@@ -14,7 +14,7 @@ ALLOWED_HOSTS = [
     host.strip()
     for host in os.environ.get(
         'ALLOWED_HOSTS',
-        'backend.cyberbriefs.org,localhost,127.0.0.1,100.60.190.113'
+        'backend.cyberbriefs.org,localhost,127.0.0.1,100.60.190.113,cyberbriefs.org,www.cyberbriefs.org'
     ).split(',')
     if host.strip()
 ]
@@ -207,9 +207,10 @@ CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = [
     'http://localhost:5173',
     'http://127.0.0.1:5173',
-
+    'https://www.cyberbriefs.org',
     'https://backend.cyberbriefs.org',
     'http://backend.cyberbriefs.org',
+    'https://cyberbrief-new-15-sep-2026.vercel.app',
 ]
 
 
@@ -232,6 +233,7 @@ if env_cors and env_cors != '*':
 CSRF_TRUSTED_ORIGINS = [
     'https://backend.cyberbriefs.org',
     'http://backend.cyberbriefs.org',
+    'https://cyberbrief-new-15-sep-2026.vercel.app',
 ]
 
 

@@ -33,6 +33,17 @@ from .models import OpenPosition, VolunteerApplication
 from .models import Article, SocialMediaConfig, RSSFeed
 from .services import get_stored_news
 
+import json
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+
+from django.contrib.auth.tokens import default_token_generator
+from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
+from django.utils.encoding import force_bytes, force_str
+from .models import SMTPConfig
+from django.core.mail.backends.smtp import EmailBackend
+from django.core.mail import EmailMultiAlternatives
+
 logger = logging.getLogger(__name__)
 
 # --- UPDATED: Live Production URLs ---
@@ -489,23 +500,10 @@ def unsubscribe_email(request):
 
 def generate_email_html(articles, subscriber):
     token = signing.dumps({"subscriber_id": subscriber.id})
-    unsubscribe_link = f"{BACKEND_URL}/api/unsubscribe/?token={token}"
+    backend_url = getattr(settings, "BACKEND_URL", FRONTEND_URL)
+    unsubscribe_link = f"{backend_url}/api/unsubscribe/?token={token}"
     
-    # --- UPDATED: Date format strictly set to MM-DD-YYYY ---
     current_date = datetime.datetime.now().strftime("%m-%d-%Y")
-    
-    PUBLIC_IMAGES = [
-    "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?auto=format&fit=crop&w=600&q=80",
-    "https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=600&q=80",
-    "https://images.unsplash.com/photo-1451187580459-43490279c0fa?auto=format&fit=crop&w=600&q=80",
-    "https://images.unsplash.com/photo-1510511459019-5dda7724fd87?auto=format&fit=crop&w=600&q=80",
-    "https://images.unsplash.com/photo-1563986768609-322da13575f3?auto=format&fit=crop&w=600&q=80",
-    "https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?auto=format&fit=crop&w=600&q=80",
-    "https://images.unsplash.com/photo-1550751827-4bd374c3f58b?auto=format&fit=crop&w=600&q=80",
-    "https://images.unsplash.com/photo-1504384308090-c894fdcc538d?auto=format&fit=crop&w=600&q=80",
-    "https://images.unsplash.com/photo-1497366754035-f200968a6e72?auto=format&fit=crop&w=600&q=80",
-    "https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=600&q=80"
-]
     
     html = f"""<!DOCTYPE html>
     <html>
@@ -517,7 +515,7 @@ def generate_email_html(articles, subscriber):
             <h2 style="font-size: 16px; color: #000000; margin: 0 0 10px 0; font-weight: bold;">Cyberbriefs Newsletter</h2>
             <hr style="border: 0; border-top: 1px solid #cccccc; margin-bottom: 15px;" />
             <p style="font-size: 11px; line-height: 1.5; color: #555555; margin-bottom: 15px;">
-                This article stresses the importance of ensuring that an organization's Non-Human Identities (NHIs) are well-prepared to tackle the latest cybersecurity threats.
+                Here are your latest curated cybersecurity updates, compiled directly from our intelligence desk.
             </p>
             <p style="font-size: 11px; color: #555555; margin-bottom: 30px;">Summary Generated at {current_date}</p>
     """
@@ -525,14 +523,17 @@ def generate_email_html(articles, subscriber):
     if not articles:
         html += "<p style='color: red;'><strong>Notice:</strong> No active articles were found in the database.</p>"
     else:
-        for i, a in enumerate(articles):
+        for a in articles:
             title = a.ai_headline or a.title
             summary = a.summary or "Summary unavailable."
             
-            # --- UPDATED: Appends &sub=true to bypass frontend subscribe popups ---
+            # Appends &sub=true to bypass frontend subscribe popups
             article_link = f"{FRONTEND_URL}/?article_id={a.id}&sub=true"
             
-            img_url = PUBLIC_IMAGES[i % len(PUBLIC_IMAGES)]
+            # --- EXACT WEBSITE MATCH: Pulls Proff_{id}.png dynamically ---
+            prof_id = getattr(a, 'professor_id', 1) or 1
+            img_url = f"{FRONTEND_URL}/images/Proff_{prof_id}.png"
+            
             if len(summary) > 230:
                 summary = summary[:227] + "..."
             
@@ -542,10 +543,10 @@ def generate_email_html(articles, subscriber):
                     <table width="100%" cellpadding="0" cellspacing="0" border="0">
                         <tr>
                             <td width="115" valign="top" style="padding-right: 15px;">
-                                <img src="{img_url}" width="100" height="100" style="display: block; border-radius: 8px; object-fit: cover; width: 100px; height: 100px; border: none;" alt="News" />
+                                <img src="{img_url}" width="100" height="100" style="display: block; border-radius: 8px; object-fit: cover; width: 100px; height: 100px; border: none;" alt="Professor Avatar" />
                             </td>
                             <td valign="top">
-                                <h3 style="margin: 0 0 8px 0; font-size: 14px; font-family: Arial, sans-serif; color: #000000;">{title}</h3>
+                                <h3 style="margin: 0 0 8px 0; font-size: 14px; font-family: Arial, sans-serif; color: #000000; font-weight: bold;">{title}</h3>
                                 <p style="margin: 0; font-size: 12px; color: #333333; line-height: 1.4; font-family: Arial, sans-serif;">{summary}</p>
                             </td>
                         </tr>
@@ -639,15 +640,24 @@ def process_mass_blast():
         if not subscribers: 
             return False, "No active subscribers found."
             
-        latest_articles = list(Article.objects.filter(is_active=True).order_by('-id')[:5])
-        backend = EmailBackend(host=config.host, port=config.port, username=config.username or config.email, password=config.password, use_tls=(config.security_protocol == 'TLS'), use_ssl=(config.security_protocol == 'SSL'))
+        # --- ENSURES LATEST 5 UPDATED ARTICLES ARE FETCHED ---
+        latest_articles = list(Article.objects.filter(is_active=True).exclude(ai_headline="").order_by('-id')[:5])
+        
+        backend = EmailBackend(
+            host=config.host, 
+            port=config.port, 
+            username=config.username or config.email, 
+            password=config.password, 
+            use_tls=(config.security_protocol == 'TLS'), 
+            use_ssl=(config.security_protocol == 'SSL')
+        )
         
         sent_count = 0
         for sub in subscribers:
             try:
                 user_html = generate_email_html(latest_articles, sub)
                 msg = EmailMultiAlternatives(
-                    subject='Cyberbriefs Newsletter',
+                    subject='Cyberbriefs Daily Intelligence',
                     body='Please view this email in an HTML-compatible client.',
                     from_email=f"{config.name or 'Cyberbriefs'} <{config.email}>",
                     to=[sub.email],
@@ -727,29 +737,99 @@ def admin_social_links(request):
         "facebook": config.facebook,
         "linkedin": config.linkedin, 
     })
-# --- BLOG ENDPOINTS WITH SCHEDULED FILTERING & BASE64 STORAGE ---
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def get_blogs(request):
     from .models import BlogPost
+    from django.core.paginator import Paginator
+
     now = timezone.now()
-    
-    blogs = BlogPost.objects.filter(is_active=True).filter(
-        models.Q(publish_option="now") | models.Q(publish_option="schedule", scheduled_for__lte=now)
+
+    blogs = BlogPost.objects.filter(
+        is_active=True
+    ).filter(
+        models.Q(publish_option="now") |
+        models.Q(
+            publish_option="schedule",
+            scheduled_for__lte=now
+        )
     ).order_by("-id")
-    
+
+    page_number = request.GET.get("page", "1")
+    limit = request.GET.get("limit", "1")
+
+    try:
+        page_number = int(page_number)
+    except (TypeError, ValueError):
+        page_number = 1
+
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 1
+
+    if page_number < 1:
+        page_number = 1
+
+    if limit < 1:
+        limit = 1
+
+    if limit > 20:
+        limit = 20
+
+    paginator = Paginator(blogs, limit)
+
+    if page_number > paginator.num_pages and paginator.num_pages > 0:
+        page_number = paginator.num_pages
+
+    if paginator.num_pages == 0:
+        return Response({
+            "count": 0,
+            "total_pages": 0,
+            "current_page": 1,
+            "next": None,
+            "previous": None,
+            "blogs": []
+        })
+
+    page_obj = paginator.get_page(page_number)
+
     data = []
-    for b in blogs:
+
+    for b in page_obj.object_list:
         data.append({
             "id": b.id,
             "title": b.title,
             "description": b.description,
             "image_url": b.image_data or "",
             "publish_option": b.publish_option,
-            "scheduled_for": b.scheduled_for.strftime("%Y-%m-%d %H:%M") if b.scheduled_for else "",
-            "created_at": b.created_at.strftime("%Y-%m-%d %H:%M"),
+            "scheduled_for": (
+                b.scheduled_for.strftime("%Y-%m-%d %H:%M")
+                if b.scheduled_for
+                else ""
+            ),
+            "created_at": b.created_at.strftime(
+                "%Y-%m-%d %H:%M"
+            )
         })
-    return Response({"blogs": data})
+
+    return Response({
+        "count": paginator.count,
+        "total_pages": paginator.num_pages,
+        "current_page": page_obj.number,
+        "next": (
+            page_obj.next_page_number()
+            if page_obj.has_next()
+            else None
+        ),
+        "previous": (
+            page_obj.previous_page_number()
+            if page_obj.has_previous()
+            else None
+        ),
+        "blogs": data
+    })
+
 
 @api_view(["GET", "POST"])
 @authentication_classes([CookieTokenAuthentication])
@@ -1062,3 +1142,80 @@ def get_positions(request):
     positions = OpenPosition.objects.filter(is_active=True)
     data = [{"id": p.id, "title": p.title, "seats": p.seats, "description": p.description} for p in positions]
     return Response({"positions": data})
+
+
+
+
+@api_view(["POST"])
+@throttle_classes([SensitiveActionThrottle])
+def password_reset_request(request):
+    email = request.data.get("email", "").strip()
+    if not email:
+        return Response({"error": "Email is required."}, status=400)
+    
+    associated_users = User.objects.filter(email=email)
+    if associated_users.exists():
+        config = SMTPConfig.objects.first()
+        
+        for user in associated_users:
+            subject = "Password Reset Requested - Cyberbriefs"
+            token = default_token_generator.make_token(user)
+            uid = urlsafe_base64_encode(force_bytes(user.pk))
+            
+            reset_link = f"{FRONTEND_URL}/login?reset_uid={uid}&reset_token={token}"
+            
+            message = (
+                f"Hello {user.username},\n\n"
+                f"You requested a password reset for your Cyberbriefs account.\n"
+                f"Click the link below to set a new password:\n{reset_link}\n\n"
+                f"If you didn't request this, please ignore this email."
+            )
+            
+            try:
+                if config:
+                    backend = EmailBackend(
+                        host=config.host, 
+                        port=config.port, 
+                        username=config.username or config.email, 
+                        password=config.password, 
+                        use_tls=(config.security_protocol == 'TLS'), 
+                        use_ssl=(config.security_protocol == 'SSL')
+                    )
+                    from_email = f"{config.name} <{config.email}>"
+                    msg = EmailMultiAlternatives(subject, message, from_email, [user.email], connection=backend)
+                    msg.send()
+                else:
+                    send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [user.email], fail_silently=False)
+            except Exception:
+                logger.exception("Failed to send password reset email via SMTP")
+                
+    return Response({"message": "If an account with that email exists, a password reset link has been sent."})
+
+
+@api_view(["POST"])
+@throttle_classes([SensitiveActionThrottle])
+def password_reset_confirm(request):
+    uid = request.data.get("uid")
+    token = request.data.get("token")
+    new_password = request.data.get("new_password")
+
+    if not uid or not token or not new_password:
+        return Response({"error": "All fields are required."}, status=400)
+
+    try:
+        user_id = force_str(urlsafe_base64_decode(uid))
+        user = User.objects.get(pk=user_id)
+    except (TypeError, ValueError, OverflowError, User.DoesNotExist):
+        user = None
+
+    if user is not None and default_token_generator.check_token(user, token):
+        try:
+            validate_password(new_password, user=user)
+        except ValidationError as exc:
+            return Response({"error": " ".join(exc.messages)}, status=400)
+            
+        user.set_password(new_password)
+        user.save()
+        return Response({"message": "Password has been successfully reset. You can now log in."})
+    else:
+        return Response({"error": "The reset link is invalid or has expired."}, status=400)

@@ -14,9 +14,12 @@ Environment=AI_MODEL_PATH=/var/www/Cancerbriefs_backend/ai_model
 Environment=CANCER_ENV_FILE=/var/www/Cancerbriefs_backend/.env
 Environment=CYBER_ENV_FILE=/var/www/Cyberbrief_new_17_Sep_Backend-/.env
 ExecStart=/var/www/shared_venv/bin/python /var/www/Cancerbriefs_backend/ai_model_worker.py
-Restart=always
+Restart=on-failure
 RestartSec=10
 TimeoutStartSec=0
+MemoryHigh=2G
+MemoryMax=2500M
+OOMPolicy=stop
 
 [Install]
 WantedBy=multi-user.target

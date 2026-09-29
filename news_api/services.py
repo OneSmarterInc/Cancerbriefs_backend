@@ -414,7 +414,7 @@ def fetch_and_store_news():
     filtered_out_time = 0
 
     now = timezone.now()
-    cutoff_time = now - timedelta(hours=2)
+    cutoff_time = now - timedelta(hours=200)
     future_cutoff = now
     candidates = []
 

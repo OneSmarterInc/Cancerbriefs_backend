@@ -15,6 +15,7 @@ from django.utils import timezone
 from django.conf import settings
 
 from .models import Article, RSSFeed, determine_professor_by_content
+from .ai_queue import enqueue_pending_articles
 
 
 CANCER_KEYWORDS = [
@@ -1112,9 +1113,7 @@ def fetch_and_store_news():
         flush=True
     )
 
-    summarized_count = (
-        process_ai_summaries()
-    )
+    queued_count = enqueue_pending_articles("cancer")
 
     print(
         f"New cancer articles collected: "
@@ -1123,8 +1122,8 @@ def fetch_and_store_news():
     )
 
     print(
-        f"New AI summaries generated: "
-        f"{summarized_count}",
+        f"AI queue jobs added: "
+        f"{queued_count}",
         flush=True
     )
 
@@ -1132,7 +1131,7 @@ def fetch_and_store_news():
 
     return {
         "new_articles": new_found,
-        "summarized_articles": summarized_count
+        "queued_articles": queued_count
     }
 
 

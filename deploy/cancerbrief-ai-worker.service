@@ -1,0 +1,22 @@
+[Unit]
+Description=Shared Qwen2.5 AI Worker for Cancerbriefs and Cyberbriefs
+After=network-online.target redis-server.service postgresql.service
+Wants=network-online.target
+Requires=redis-server.service
+
+[Service]
+User=ubuntu
+Group=www-data
+WorkingDirectory=/var/www/Cancerbriefs_backend
+EnvironmentFile=/var/www/Cancerbriefs_backend/.env
+Environment=REDIS_URL=redis://127.0.0.1:6379/0
+Environment=AI_MODEL_PATH=/var/www/Cancerbriefs_backend/ai_model
+Environment=CANCER_ENV_FILE=/var/www/Cancerbriefs_backend/.env
+Environment=CYBER_ENV_FILE=/var/www/Cyberbrief_new_17_Sep_Backend-/.env
+ExecStart=/var/www/shared_venv/bin/python /var/www/Cancerbriefs_backend/ai_model_worker.py
+Restart=always
+RestartSec=10
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

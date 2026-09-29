@@ -315,20 +315,6 @@ def reset_article_database():
     return deleted_count
 
 def get_active_feeds():
-    existing_urls = set(RSSFeed.objects.values_list("url", flat=True))
-    missing_feeds = [
-        RSSFeed(
-            name=feed["name"],
-            url=feed["url"],
-            category=feed["category"],
-            is_active=True,
-        )
-        for feed in DEFAULT_RSS_FEEDS
-        if feed["url"] not in existing_urls
-    ]
-    if missing_feeds:
-        RSSFeed.objects.bulk_create(missing_feeds, batch_size=100, ignore_conflicts=True)
-
     feeds = RSSFeed.objects.filter(is_active=True)
     return [{"name": f.name, "url": f.url, "category": f.category} for f in feeds]
 

@@ -383,11 +383,24 @@ def main():
     )
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_PATH,
-        torch_dtype="auto",
-        device_map="auto",
-    )
+
+    if torch.cuda.is_available():
+        print("[AI WORKER] CUDA detected; loading Qwen2.5 on GPU", flush=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_PATH,
+            dtype=torch.float16,
+            device_map="auto",
+        )
+    else:
+        print("[AI WORKER] No CUDA detected; loading Qwen2.5 on CPU", flush=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_PATH,
+            dtype=torch.float32,
+            device_map=None,
+            low_cpu_mem_usage=False,
+        )
+        model = model.to("cpu")
+
     model.eval()
 
     print(

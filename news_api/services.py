@@ -276,7 +276,7 @@ CANCER_KEYWORDS = [
 
 MODEL_PATH = os.path.join(
     settings.BASE_DIR,
-    "/var/www/Cyberbrief_new_17_Sep_Backend-/ai_model"
+    "ai_model"
 )
 
 
@@ -346,7 +346,8 @@ def reset_article_database():
 
     print(
         f"Database Reset: Removed "
-        f"{deleted_count} old articles."
+        f"{deleted_count} old articles.",
+        flush=True
     )
 
     return deleted_count

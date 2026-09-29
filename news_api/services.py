@@ -515,7 +515,7 @@ def fetch_and_store_news():
         
         try:
             from transformers import AutoTokenizer, AutoModelForCausalLM
-            MODEL_PATH = os.path.join(settings.BASE_DIR, "ai_model")
+            MODEL_PATH = os.path.join(settings.BASE_DIR, "/var/www/Cyberbrief_new_17_Sep_Backend-/ai_model")
             tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
             model = AutoModelForCausalLM.from_pretrained(MODEL_PATH)
         except Exception as e:

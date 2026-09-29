@@ -280,6 +280,8 @@ def generate_summary(tokenizer, model, job):
     inputs = tokenizer(
         [text_input],
         return_tensors="pt",
+        truncation=True,
+        max_length=1536,
     )
 
     model_device = next(model.parameters()).device
@@ -289,15 +291,16 @@ def generate_summary(tokenizer, model, job):
         for key, value in inputs.items()
     }
 
-    with torch.no_grad():
+    with torch.inference_mode():
         outputs = model.generate(
             **inputs,
-            max_new_tokens=220,
-            min_new_tokens=100,
+            max_new_tokens=120,
+            min_new_tokens=30,
             temperature=0.3,
             do_sample=True,
             top_p=0.9,
             repetition_penalty=1.15,
+            use_cache=True,
         )
 
     generated_tokens = outputs[0][
@@ -308,6 +311,10 @@ def generate_summary(tokenizer, model, job):
         generated_tokens,
         skip_special_tokens=True,
     )
+
+    del outputs
+    del generated_tokens
+    del inputs
 
     return clean_summary(raw_summary, title, project)
 
@@ -392,16 +399,18 @@ def main():
             device_map="auto",
         )
     else:
-        print("[AI WORKER] No CUDA detected; loading Qwen2.5 on CPU", flush=True)
+        print("[AI WORKER] No CUDA detected; loading Qwen2.5 on CPU with BF16", flush=True)
+        torch.set_num_threads(2)
         model = AutoModelForCausalLM.from_pretrained(
             MODEL_PATH,
-            dtype=torch.float32,
+            dtype=torch.bfloat16,
             device_map=None,
-            low_cpu_mem_usage=False,
+            low_cpu_mem_usage=True,
         )
         model = model.to("cpu")
 
     model.eval()
+    model.generation_config.use_cache = True
 
     print(
         "[AI WORKER] Qwen2.5 loaded. Fair round-robin queue started.",

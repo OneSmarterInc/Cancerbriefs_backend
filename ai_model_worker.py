@@ -1,8 +1,6 @@
 import json
 import os
 import time
-import uuid
-
 import psycopg
 import redis
 import torch
@@ -25,7 +23,6 @@ CYBER_ENV_FILE = os.getenv(
 )
 
 FLEXEE_RESULT_TTL = int(os.getenv("FLEXEE_RESULT_TTL", "3600"))
-FLEXEE_JOB_TIMEOUT = int(os.getenv("FLEXEE_JOB_TIMEOUT", "900"))
 
 PROJECTS = {
     "cancer": {
@@ -52,12 +49,6 @@ PROJECTS = {
             "Do not repeat the title."
         ),
     },
-}
-
-PROJECT_PRIORITY = {
-    "flexee": 0,
-    "cancer": 1,
-    "cyber": 1,
 }
 
 
@@ -396,6 +387,9 @@ def generate_flexee(tokenizer, model, job):
         skip_special_tokens=True,
     ).strip()
 
+    input_tokens = int(inputs["input_ids"].shape[-1])
+    output_tokens = int(generated_tokens.shape[-1])
+
     del outputs
     del generated_tokens
     del inputs
@@ -406,8 +400,9 @@ def generate_flexee(tokenizer, model, job):
     return {
         "model": "qwen2.5-shared",
         "content": content,
-        "input_tokens": int(inputs["input_ids"].shape[-1]) if False else 0,
-        "output_tokens": len(generated_tokens) if False else 0,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "usage_estimated": False,
     }
 
 

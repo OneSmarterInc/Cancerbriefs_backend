@@ -1,6 +1,7 @@
 import json
 import os
 import time
+import uuid
 
 import psycopg
 import redis
@@ -22,6 +23,9 @@ CYBER_ENV_FILE = os.getenv(
     "CYBER_ENV_FILE",
     "/var/www/Cyberbrief_new_17_Sep_Backend-/.env",
 )
+
+FLEXEE_RESULT_TTL = int(os.getenv("FLEXEE_RESULT_TTL", "3600"))
+FLEXEE_JOB_TIMEOUT = int(os.getenv("FLEXEE_JOB_TIMEOUT", "900"))
 
 PROJECTS = {
     "cancer": {
@@ -48,6 +52,12 @@ PROJECTS = {
             "Do not repeat the title."
         ),
     },
+}
+
+PROJECT_PRIORITY = {
+    "flexee": 0,
+    "cancer": 1,
+    "cyber": 1,
 }
 
 
@@ -92,62 +102,8 @@ def dedup_key(project, article_id):
     return f"ai_queued:{project}:{article_id}"
 
 
-def mark_processing(project, article_id):
-    with connect_db(project) as conn:
-        row = conn.execute(
-            """
-            UPDATE news_api_article
-            SET ai_status = 'processing', ai_locked_at = NOW()
-            WHERE id = %s AND ai_status = 'pending' AND ai_headline = ''
-            RETURNING id
-            """,
-            (article_id,),
-        ).fetchone()
-
-    return row is not None
-
-
-def mark_completed(project, article_id, title, summary):
-    with connect_db(project) as conn:
-        row = conn.execute(
-            """
-            UPDATE news_api_article
-            SET ai_headline = %s,
-                summary = %s,
-                ai_status = 'completed',
-                ai_locked_at = NULL,
-                ai_completed_at = NOW()
-            WHERE id = %s AND ai_status = 'processing'
-            RETURNING id
-            """,
-            (title[:500], summary[:2000], article_id),
-        ).fetchone()
-
-    return row is not None
-
-
-def mark_retry(project, article_id):
-    with connect_db(project) as conn:
-        conn.execute(
-            """
-            UPDATE news_api_article
-            SET ai_status = 'pending', ai_locked_at = NULL
-            WHERE id = %s
-            """,
-            (article_id,),
-        )
-
-
-def mark_failed(project, article_id):
-    with connect_db(project) as conn:
-        conn.execute(
-            """
-            UPDATE news_api_article
-            SET ai_status = 'failed', ai_locked_at = NULL
-            WHERE id = %s
-            """,
-            (article_id,),
-        )
+def result_key(job_id):
+    return f"ai_result:{job_id}"
 
 
 def load_pending_jobs(client, project):
@@ -229,6 +185,64 @@ def requeue_stale_jobs(client, project):
         print(
             f"[QUEUE] {project}: requeued {len(rows)} stale jobs",
             flush=True,
+        )
+
+
+def mark_processing(project, article_id):
+    with connect_db(project) as conn:
+        row = conn.execute(
+            """
+            UPDATE news_api_article
+            SET ai_status = 'processing', ai_locked_at = NOW()
+            WHERE id = %s AND ai_status = 'pending' AND ai_headline = ''
+            RETURNING id
+            """,
+            (article_id,),
+        ).fetchone()
+
+    return row is not None
+
+
+def mark_completed(project, article_id, title, summary):
+    with connect_db(project) as conn:
+        row = conn.execute(
+            """
+            UPDATE news_api_article
+            SET ai_headline = %s,
+                summary = %s,
+                ai_status = 'completed',
+                ai_locked_at = NULL,
+                ai_completed_at = NOW()
+            WHERE id = %s AND ai_status = 'processing'
+            RETURNING id
+            """,
+            (title[:500], summary[:2000], article_id),
+        ).fetchone()
+
+    return row is not None
+
+
+def mark_retry(project, article_id):
+    with connect_db(project) as conn:
+        conn.execute(
+            """
+            UPDATE news_api_article
+            SET ai_status = 'pending', ai_locked_at = NULL
+            WHERE id = %s
+            """,
+            (article_id,),
+        )
+
+
+def mark_failed(project, article_id):
+    with connect_db(project) as conn:
+        conn.execute(
+            """
+            UPDATE news_api_article
+            SET ai_status = 'failed', ai_locked_at = NULL
+            WHERE id = %s
+            """,
+            (article_id,),
         )
 
 
@@ -319,7 +333,85 @@ def generate_summary(tokenizer, model, job):
     return clean_summary(raw_summary, title, project)
 
 
-def process_job(client, tokenizer, model, job):
+def generate_flexee(tokenizer, model, job):
+    prompt = str(job.get("prompt") or "").strip()
+    if not prompt:
+        raise ValueError("Flexee AI job has an empty prompt")
+
+    max_tokens = max(1, min(int(job.get("max_tokens") or 1100), 2000))
+    num_ctx = max(512, min(int(job.get("num_ctx") or 4096), 8192))
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an expert scholarly manuscript analyst. "
+                "Always return valid JSON exactly matching the schema requested "
+                "in the user prompt. Do not add markdown fences or prose around the JSON."
+            ),
+        },
+        {
+            "role": "user",
+            "content": prompt,
+        },
+    ]
+
+    text_input = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    inputs = tokenizer(
+        [text_input],
+        return_tensors="pt",
+        truncation=True,
+        max_length=num_ctx - max_tokens,
+    )
+
+    model_device = next(model.parameters()).device
+    inputs = {
+        key: value.to(model_device)
+        for key, value in inputs.items()
+    }
+
+    with torch.inference_mode():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=max_tokens,
+            min_new_tokens=1,
+            temperature=float(job.get("temperature") or 0.2),
+            do_sample=True,
+            top_p=0.9,
+            repetition_penalty=1.15,
+            use_cache=True,
+        )
+
+    generated_tokens = outputs[0][
+        inputs["input_ids"].shape[-1]:
+    ]
+
+    content = tokenizer.decode(
+        generated_tokens,
+        skip_special_tokens=True,
+    ).strip()
+
+    del outputs
+    del generated_tokens
+    del inputs
+
+    if not content:
+        raise RuntimeError("Qwen returned an empty Flexee response")
+
+    return {
+        "model": "qwen2.5-shared",
+        "content": content,
+        "input_tokens": int(inputs["input_ids"].shape[-1]) if False else 0,
+        "output_tokens": len(generated_tokens) if False else 0,
+    }
+
+
+def process_article_job(client, tokenizer, model, job):
     project = job["project"]
     article_id = job["article_id"]
     attempts = int(job.get("attempts", 0))
@@ -371,6 +463,47 @@ def process_job(client, tokenizer, model, job):
             )
 
 
+def process_flexee_job(client, tokenizer, model, job):
+    job_id = str(job.get("job_id") or "")
+    if not job_id:
+        raise ValueError("Flexee job is missing job_id")
+
+    try:
+        payload = generate_flexee(tokenizer, model, job)
+        client.set(
+            result_key(job_id),
+            json.dumps({"ok": True, "result": payload}),
+            ex=FLEXEE_RESULT_TTL,
+        )
+        print(
+            f"[AI] FLEXEE job {job_id} completed",
+            flush=True,
+        )
+    except Exception as exc:
+        client.set(
+            result_key(job_id),
+            json.dumps({"ok": False, "error": str(exc)}),
+            ex=FLEXEE_RESULT_TTL,
+        )
+        print(
+            f"[AI ERROR] FLEXEE job {job_id}: {exc}",
+            flush=True,
+        )
+
+
+def select_next_job(client):
+    flexee_job = client.lpop(queue_key("flexee"))
+    if flexee_job is not None:
+        return "flexee", flexee_job
+
+    for project in ("cancer", "cyber"):
+        raw = client.lpop(queue_key(project))
+        if raw is not None:
+            return project, raw
+
+    return None, None
+
+
 def main():
     client = redis.from_url(
         REDIS_URL,
@@ -399,7 +532,10 @@ def main():
             device_map="auto",
         )
     else:
-        print("[AI WORKER] No CUDA detected; loading Qwen2.5 on CPU with BF16", flush=True)
+        print(
+            "[AI WORKER] No CUDA detected; loading Qwen2.5 on CPU with BF16",
+            flush=True,
+        )
         torch.set_num_threads(2)
         model = AutoModelForCausalLM.from_pretrained(
             MODEL_PATH,
@@ -413,23 +549,12 @@ def main():
     model.generation_config.use_cache = True
 
     print(
-        "[AI WORKER] Qwen2.5 loaded. Fair round-robin queue started.",
+        "[AI WORKER] Qwen2.5 loaded. Flexee priority / Cancer-Cyber normal queue started.",
         flush=True,
     )
 
-    next_project = "cancer"
-
     while True:
-        first = next_project
-        second = "cyber" if first == "cancer" else "cancer"
-
-        raw = client.lpop(queue_key(first))
-
-        if raw is None:
-            raw = client.lpop(queue_key(second))
-            selected_project = second
-        else:
-            selected_project = first
+        selected_project, raw = select_next_job(client)
 
         if raw is None:
             time.sleep(2)
@@ -437,16 +562,21 @@ def main():
                 load_pending_jobs(client, project)
             continue
 
-        job = json.loads(raw)
-        next_project = "cyber" if selected_project == "cancer" else "cancer"
+        try:
+            job = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            print(f"[AI WORKER] Invalid queue payload: {exc}", flush=True)
+            continue
 
         print(
-            f"[AI WORKER] Selected {selected_project.upper()} article "
-            f"{job['article_id']}",
+            f"[AI WORKER] Selected {selected_project.upper()} job",
             flush=True,
         )
 
-        process_job(client, tokenizer, model, job)
+        if selected_project == "flexee":
+            process_flexee_job(client, tokenizer, model, job)
+        else:
+            process_article_job(client, tokenizer, model, job)
 
 
 if __name__ == "__main__":
